@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -32,21 +31,26 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; background-color:
 st.markdown("""
 <div class="dashboard-header">
     <div class="dashboard-title">◈ DCF Valuation Terminal</div>
-    <div class="dashboard-subtitle">AUTOMATED DISCOUNTED CASH FLOW MODEL · LIVE FINANCIALS</div>
+    <div class="dashboard-subtitle">AUTOMATED DISCOUNTED CASH FLOW MODEL · ANNUAL / LTM TOGGLE</div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── INPUT ────────────────────────────────────────────────────
-ticker = st.text_input("Enter Ticker", value="AAPL").upper()
+c_ticker, c_basis = st.columns([2, 1])
+with c_ticker:
+    ticker = st.text_input("Enter Ticker", value="AAPL").upper()
+with c_basis:
+    basis = st.radio("Data Basis", ["Annual (Last 10-K)", "LTM (Last 4 Quarters)"], horizontal=True)
 
 if not ticker:
     st.stop()
 
 try:
     stock = yf.Ticker(ticker)
-    income_statement = stock.financials
+    annual_income = stock.financials
+    annual_cash = stock.cashflow
+    quarterly_income = stock.quarterly_financials
+    quarterly_cash = stock.quarterly_cashflow
     balance_sheet = stock.balance_sheet
-    cash_flow = stock.cashflow
     info = stock.info
     current_price = info.get('currentPrice', None)
     company_name = info.get('shortName', ticker)
@@ -54,7 +58,6 @@ except:
     st.error("Could not pull data for that ticker")
     st.stop()
 
-# ── SUGGESTED ASSUMPTIONS ───────────────────────────────────
 sector = info.get('sector', 'Unknown')
 recent_growth = info.get('revenueGrowth', 0.05)
 profit_margin = info.get('profitMargins', 0.15)
@@ -71,9 +74,16 @@ elif sector in ['Consumer Defensive', 'Utilities']:
 else:
     suggested_terminal = 0.025
 
-st.markdown(f'<div class="section-label">Company: {company_name}  ·  Sector: {sector}  ·  Beta: {beta:.2f}</div>', unsafe_allow_html=True)
+# Determine data period label
+if basis == "LTM (Last 4 Quarters)":
+    period_end = quarterly_income.columns[0].strftime('%b %Y')
+    period_label = f"LTM through {period_end}"
+else:
+    period_end = annual_income.columns[0].strftime('%b %Y')
+    period_label = f"FY ending {period_end}"
 
-# ── EDITABLE ASSUMPTION INPUTS ──────────────────────────────
+st.markdown(f'<div class="section-label">Company: {company_name}  ·  Sector: {sector}  ·  Beta: {beta:.2f}  ·  {period_label}</div>', unsafe_allow_html=True)
+
 st.markdown('<div class="section-label" style="margin-top:1rem">Assumptions (Edit to Test Scenarios)</div>', unsafe_allow_html=True)
 
 c1, c2, c3, c4 = st.columns(4)
@@ -86,24 +96,33 @@ with c3:
 with c4:
     terminal_growth_rate = st.number_input("Terminal Growth (%)", value=float(suggested_terminal * 100), step=0.25) / 100
 
-# ── DCF CALCULATION ─────────────────────────────────────────
 try:
-    date = income_statement.columns[0]
-    revenue = income_statement.loc['Total Revenue', date]
-    ebit = income_statement.loc['EBIT', date]
-    tax_provision = income_statement.loc['Tax Provision', date]
-    pretax_income = income_statement.loc['Pretax Income', date]
-    da = cash_flow.loc['Depreciation And Amortization', date]
-    capital_expenditure = cash_flow.loc['Capital Expenditure', date]
+    if basis == "LTM (Last 4 Quarters)":
+        revenue = quarterly_income.loc['Total Revenue'].iloc[:4].sum()
+        ebit = quarterly_income.loc['EBIT'].iloc[:4].sum()
+        tax_provision = quarterly_income.loc['Tax Provision'].iloc[:4].sum()
+        pretax_income = quarterly_income.loc['Pretax Income'].iloc[:4].sum()
+        da = quarterly_cash.loc['Depreciation And Amortization'].iloc[:4].sum()
+        capital_expenditure = quarterly_cash.loc['Capital Expenditure'].iloc[:4].sum()
+        diluted_average_shares = quarterly_income.loc['Diluted Average Shares'].iloc[0]
+    else:
+        date = annual_income.columns[0]
+        revenue = annual_income.loc['Total Revenue', date]
+        ebit = annual_income.loc['EBIT', date]
+        tax_provision = annual_income.loc['Tax Provision', date]
+        pretax_income = annual_income.loc['Pretax Income', date]
+        da = annual_cash.loc['Depreciation And Amortization', date]
+        capital_expenditure = annual_cash.loc['Capital Expenditure', date]
+        diluted_average_shares = annual_income.loc['Diluted Average Shares', date]
     
+    bs_date = balance_sheet.columns[0]
     try:
-        net_debt = balance_sheet.loc['Net Debt', date]
+        net_debt = balance_sheet.loc['Net Debt', bs_date]
         if pd.isna(net_debt):
-            net_debt = balance_sheet.loc['Total Debt', date] - balance_sheet.loc['Cash And Cash Equivalents', date]
+            net_debt = balance_sheet.loc['Total Debt', bs_date] - balance_sheet.loc['Cash And Cash Equivalents', bs_date]
     except:
-        net_debt = balance_sheet.loc['Total Debt', date] - balance_sheet.loc['Cash And Cash Equivalents', date]
+        net_debt = balance_sheet.loc['Total Debt', bs_date] - balance_sheet.loc['Cash And Cash Equivalents', bs_date]
     
-    diluted_average_shares = income_statement.loc['Diluted Average Shares', date]
     effective_tax_rate = tax_provision / pretax_income
     
     projected_ufcfs = []
@@ -133,7 +152,6 @@ try:
     equity_value = enterprise_value - net_debt
     price_per_share = equity_value / diluted_average_shares
     
-    # ── OUTPUT METRICS ──────────────────────────────────────
     st.markdown('<div class="section-label" style="margin-top:1.5rem">Valuation Output</div>', unsafe_allow_html=True)
     
     if current_price:
@@ -167,11 +185,9 @@ try:
             <div class="metric-value {col_class}">{verdict}</div>
         </div>""", unsafe_allow_html=True)
     
-    # ── PROJECTIONS TABLE ───────────────────────────────────
-    st.markdown('<div class="section-label" style="margin-top:1.5rem">5-Year Projections</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-label" style="margin-top:1.5rem">5-Year Projections (Starting Revenue: ${revenue/1e9:,.1f}B)</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame(projection_data), use_container_width=True, hide_index=True)
     
-    # ── VALUE BREAKDOWN ─────────────────────────────────────
     st.markdown('<div class="section-label" style="margin-top:1.5rem">Value Breakdown</div>', unsafe_allow_html=True)
     
     b1, b2, b3 = st.columns(3)
